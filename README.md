@@ -32,12 +32,15 @@ Example output:
 Retrieved Mon Jul 01 2024 17:50:21 GMT+0200 (Central European Summer Time)
 ```
 
+## Requirements
+
+- [Node.js](https://nodejs.org/) v26 or newer installed
+
 ## Usage
 
-0. Prerequisite: You must have [Node.js](https://nodejs.org/) installed.
 1. Run `npm install`
 2. Enter your parkrun credentials in `.env`
-3. Finally execute the script: `npm start`
+3. Execute the script: `npm start`
 
 ## References
 
