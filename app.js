@@ -1,121 +1,227 @@
-require("dotenv").config();
-const {JSDOM} = require("jsdom");
+const { JSDOM } = require("jsdom");
 
-const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const USER_AGENT =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
+const NZ_EVENT_URL = "https://www.parkrun.co.nz";
 
-async function printEventsInGermany() {
-    let accessToken = await login(process.env.PARKRUN_ID, process.env.PARKRUN_PASSWORD);
+async function printEventsInNZ() {
+    const {
+        PARKRUN_ID,
+        PARKRUN_PASSWORD,
+        PARKRUN_SERVER,
+        PARKRUN_COUNTRY_ID
+    } = process.env;
 
-    const GERMANY = 32;
-    let events = await searchEvents(GERMANY, accessToken);
+    if (!PARKRUN_ID || !PARKRUN_PASSWORD || !PARKRUN_SERVER || !PARKRUN_COUNTRY_ID) {
+        throw new Error(
+            "Missing one or more required environment variables: " +
+            "PARKRUN_ID, PARKRUN_PASSWORD, PARKRUN_SERVER, PARKRUN_COUNTRY_ID."
+        );
+    }
 
-    let detailsPromises = events.data.Events
-        .map(event => getEventDetails(event));
+    const accessToken = await login(PARKRUN_ID, PARKRUN_PASSWORD);
+    const response = await searchEvents(PARKRUN_COUNTRY_ID, accessToken);
+    const events = response?.data?.Events;
 
-    let allDetails = await Promise.all(detailsPromises);
-    allDetails
-        .sort((s1, s2) => s2.totalEventsStaged - s1.totalEventsStaged)
-        .sort((s1, s2) => s1.firstEvent - s2.firstEvent)
-        .forEach((eventDetails, i) => logEventDetails(i + 1, eventDetails));
+    if (!Array.isArray(events)) {
+        throw new Error(
+            `Unexpected event API response: ${JSON.stringify(response)}`
+        );
+    }
 
-    console.log(`\nRetrieved ${new Date()}`);
+    const details = await Promise.all(events.map(getEventDetails));
+
+    details.sort((a, b) => {
+        if (a.firstEvent && b.firstEvent) {
+            return a.firstEvent - b.firstEvent ||
+                b.totalEventsStaged - a.totalEventsStaged;
+        }
+        if (a.firstEvent) return -1;
+        if (b.firstEvent) return 1;
+        return b.totalEventsStaged - a.totalEventsStaged;
+    });
+
+    details.forEach((event, index) => logEventDetails(index + 1, event));
+
+    console.log(
+        `\nRetrieved ${new Date().toLocaleString("en-NZ", {
+            timeZone: "Pacific/Auckland",
+            dateStyle: "medium",
+            timeStyle: "medium",
+            timeZoneName: "long"
+        })}`
+    );
 }
 
 async function searchEvents(countryId, accessToken) {
-    let url = `https://${process.env.PARKRUN_SERVER}/v1/countries/${countryId}/searchEvents?expandedDetails=true&access_token=${accessToken}&scope=app`;
-    return fetch(url)
-        .then(response => response.json());
+    const url = new URL(
+        `https://${process.env.PARKRUN_SERVER}/v1/countries/${encodeURIComponent(countryId)}/searchEvents`
+    );
+
+    url.search = new URLSearchParams({
+        expandedDetails: "true",
+        access_token: accessToken,
+        scope: "app"
+    });
+
+    const response = await fetch(url);
+
+    if (!response.ok) {
+        throw new Error(
+            `Event search failed: HTTP ${response.status} ${response.statusText}`
+        );
+    }
+
+    return response.json();
 }
 
-function getEventDetails(event) {
-    let eventId = event.EventName;
-    return fetchEventHistory(eventId)
-        .then(eventHistory => extractEventDetails(event, eventHistory));
+async function getEventDetails(event) {
+    const eventId = event.EventName;
+
+    if (!eventId) {
+        throw new Error("An event returned by the API has no EventName.");
+    }
+
+    const history = await fetchEventHistory(eventId);
+    return extractEventDetails(event, history);
 }
 
 async function fetchEventHistory(eventId) {
-    let url = `https://www.parkrun.com.de/${eventId}/results/eventhistory/`;
-    let options = {headers: {"User-Agent": USER_AGENT}};
-    return fetch(url, options)
-        .then(response => {
-            if (!response.ok) {
-                throw new Error(`Fetching event history failed: ${response.statusText}`);
-            }
-            return response.text();
-        });
+    const url =
+        `${NZ_EVENT_URL}/${encodeURIComponent(eventId)}/results/eventhistory/`;
+
+    const response = await fetch(url, {
+        headers: { "User-Agent": USER_AGENT }
+    });
+
+    if (!response.ok) {
+        throw new Error(
+            `Fetching event history for ${eventId} failed: ` +
+            `HTTP ${response.status} ${response.statusText}`
+        );
+    }
+
+    return response.text();
 }
 
 function extractEventDetails(event, eventHistory) {
-    let dom = new JSDOM(eventHistory);
-    let eventHappenings = dom.window.document.querySelectorAll("tr.Results-table-row");
-    let numberOfHappenings = eventHappenings.length;
-    let dateOfFirstHappening = numberOfHappenings > 0 ?
-        parseDate(eventHappenings[numberOfHappenings - 1].getAttribute("data-date")) :
-        new Date();
+    const dom = new JSDOM(eventHistory);
+    const rows = dom.window.document.querySelectorAll(
+        "tr.Results-table-row"
+    );
+
+    const dates = Array.from(rows)
+        .map(row => parseDate(row.getAttribute("data-date")))
+        .filter(date => date !== null)
+        .sort((a, b) => a - b);
 
     return {
         id: event.EventName,
-        shortName: event.EventShortName,
         longName: event.EventLongName,
         location: event.EventLocation,
-        totalEventsStaged: numberOfHappenings,
-        firstEvent: dateOfFirstHappening
+        totalEventsStaged: rows.length,
+        firstEvent: dates.length > 0 ? dates[0] : null
     };
 }
 
-function parseDate(formattedDate) {
-    // example formattedDate: "23/03/2019"
-    let parts = formattedDate.split("-");
-    let year = parts[0];
-    let month = parts[1] - 1;
-    let day = parts[2];
-    return new Date(year, month, day);
+function parseDate(value) {
+    if (!value) return null;
+
+    // ISO date: YYYY-MM-DD
+    let match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+    if (match) {
+        const [, year, month, day] = match;
+        return validDate(Number(year), Number(month), Number(day));
+    }
+
+    // NZ-style date: DD/MM/YYYY
+    match = value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+
+    if (match) {
+        const [, day, month, year] = match;
+        return validDate(Number(year), Number(month), Number(day));
+    }
+
+    return null;
 }
 
-function logEventDetails(i, stats) {
-    let formatDate = (date) => date ?
-        date.toLocaleDateString("de-DE", {day: "2-digit", month: "2-digit", year: "numeric"}) :
-        "n.a.";
-    let numberOfRunsText = stats.totalEventsStaged > 0 ?
-        `${stats.totalEventsStaged} runs since ${formatDate(stats.firstEvent)}` :
-        "0 runs";
+function validDate(year, month, day) {
+    const date = new Date(Date.UTC(year, month - 1, day));
 
-    console.log(`${i}. ${stats.longName} (${stats.location}): ${numberOfRunsText} - https://www.parkrun.com.de/${stats.id}/`);
+    if (
+        date.getUTCFullYear() !== year ||
+        date.getUTCMonth() !== month - 1 ||
+        date.getUTCDate() !== day
+    ) {
+        return null;
+    }
+
+    return date;
+}
+
+function logEventDetails(index, stats) {
+    const firstEventDate = stats.firstEvent
+        ? stats.firstEvent.toLocaleDateString("en-NZ", {
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+            timeZone: "UTC"
+        })
+        : null;
+
+    const runsText = stats.totalEventsStaged > 0
+        ? `${stats.totalEventsStaged} runs since ${firstEventDate || "unknown date"}`
+        : "0 runs";
+
+    console.log(
+        `${index}. ${stats.longName} (${stats.location}): ` +
+        `${runsText} - ${NZ_EVENT_URL}/${stats.id}/`
+    );
 }
 
 async function login(username, password) {
-    let url = `https://${process.env.PARKRUN_SERVER}/user_auth.php`;
+    const url = `https://${process.env.PARKRUN_SERVER}/user_auth.php`;
 
-    let details = {
-        "username": username,
-        "password": password,
-        "grant_type": "password",
-        "scope": "app"
-    };
+    const body = new URLSearchParams({
+        username,
+        password,
+        grant_type: "password",
+        scope: "app"
+    });
 
-    let formBody = Object.keys(details)
-        .map(key => `${encodeURIComponent(key)}=${encodeURIComponent(details[key])}`)
-        .join("&");
-
-    let options = {
+    const response = await fetch(url, {
         method: "POST",
-        body: formBody,
+        body,
         headers: {
-            "Authorization": "Basic bmV0ZHJlYW1zLWlwaG9uZS1zMDE6Z2ZLYkRENk5Ka1lvRm1raXNSKGlWRm9wUUNLV3piUWVRZ1pBWlpLSw==",
-            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"
+            "Authorization":
+                "Basic bmV0ZHJlYW1zLWlwaG9uZS1zMDE6Z2ZLYkRENk5Ka1lvRm1raXNSKGlWRm9wUUNLV3piUWVRZ1pBWlpLSw==",
+            "Content-Type":
+                "application/x-www-form-urlencoded;charset=UTF-8"
         }
-    };
+    });
 
-    return fetch(url, options)
-        .then(response => response.json())
-        .then(token => {
-            if (token.error) {
-                throw new Error(token.error_description);
-            }
-            return token.access_token;
-        });
+    if (!response.ok) {
+        throw new Error(
+            `Login failed: HTTP ${response.status} ${response.statusText}`
+        );
+    }
+
+    const token = await response.json();
+
+    if (token.error || !token.access_token) {
+        throw new Error(
+            token.error_description ||
+            token.error ||
+            "No access token returned by the parkrun API."
+        );
+    }
+
+    return token.access_token;
 }
 
-
-printEventsInGermany();
+printEventsInNZ().catch(error => {
+    console.error("New Zealand parkrun report failed:", error.message);
+    process.exitCode = 1;
+});

@@ -1,0 +1,47 @@
+name: New Zealand parkrun events
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parkrun:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run New Zealand parkrun report
+        env:
+          PARKRUN_ID: ${{ secrets.PARKRUN_ID }}
+          PARKRUN_PASSWORD: ${{ secrets.PARKRUN_PASSWORD }}
+          PARKRUN_SERVER: ${{ secrets.PARKRUN_SERVER }}
+          PARKRUN_COUNTRY_ID: ${{ secrets.PARKRUN_COUNTRY_ID }}
+        run: npm start > parkrun-nz.txt
+
+      - name: Display report
+        if: always()
+        run: |
+          if [ -f parkrun-nz.txt ]; then
+            cat parkrun-nz.txt
+          fi
+
+      - name: Upload report
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: new-zealand-parkrun-report
+          path: parkrun-nz.txt
+          retention-days: 30
